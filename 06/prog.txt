@@ -1,0 +1,307 @@
+import java.io.File;
+import java.io.FileWriter;
+import java.util.HashMap;
+import java.util.Scanner;
+
+//Singleton Parser instance ;
+public class Parser {
+    private static  Parser my_parser_instance  = null ;
+    private  static String asm_path ;
+    private  static String hack_path ;
+    private static int lines_count  ;
+    static  int  vars_count   ;
+
+    public static HashMap<String,Integer> cMap = new HashMap<String, Integer>();
+    public static HashMap<String,String> compAMap = new HashMap<String, String>();
+    public static HashMap<String,String> compMMap = new HashMap<String, String>();
+    public static HashMap<String,String> dstMap = new HashMap<String, String>();
+    public static HashMap<String,String> jmpMap = new HashMap<String, String>();
+
+    private final static short __DEST  = 0 ;
+    private final static short __COMP  = 1 ;
+    private final static short __JMP  = 2 ;
+
+    private Parser() {
+        lines_count = -1 ;
+        vars_count = 16 ;
+
+        //put all predefined vars into a HashMap
+        cMap.put("SP",0);cMap.put("LCL",1);cMap.put("ARG",2);cMap.put("THIS",3);
+        cMap.put("THAT",4);cMap.put("R0",0);cMap.put("R1",1);cMap.put("R2",2);
+        cMap.put("R3",3);cMap.put("R4",4);cMap.put("R5",5);cMap.put("R6",6);
+        cMap.put("R7",7);cMap.put("R8",8);cMap.put("R9",9);cMap.put("R10",10);
+        cMap.put("R11",11);cMap.put("R12",12);cMap.put("R13",13);cMap.put("R14",14);
+        cMap.put("R15",15);cMap.put("SCREEN",16384);cMap.put("KBD",24576);
+
+
+        //for c instructions comp=dst;jmp
+        //put all comp possibilities with A into a HashMap,a=0
+        compAMap.put("0","0101010");compAMap.put("1","0111111");compAMap.put("-1","0111010");
+        compAMap.put("D","0001100");compAMap.put("A","0110000");compAMap.put("!D","0001101");
+        compAMap.put("!A","0110001");compAMap.put("-D","0001111");compAMap.put("-A","0110011");
+        compAMap.put("D+1","0011111");compAMap.put("A+1","0110111");compAMap.put("D-1","0001110");
+        compAMap.put("A-1","0110010");compAMap.put("D+A","0000010");compAMap.put("D-A","0010011");
+        compAMap.put("A-D","0000111");compAMap.put("D&A","0000000");compAMap.put("D|A","0010101");
+
+        //for c instructions comp=dst;jmp
+        //put all comp possibilities with M into a HashMap,a=1
+        compMMap.put("M","1110000");compMMap.put("!M","1110001");compMMap.put("-M","1110011");
+        compMMap.put("M+1","1110111");compMMap.put("M-1","1110010");compMMap.put("D+M","1000010");
+        compMMap.put("D-M","1010011");compMMap.put("M-D","1000111");compMMap.put("D&M","1000000");
+        compMMap.put("D|M","1010101");
+
+        //put all dst possibilities into a HashMap
+        dstMap.put("0","000");dstMap.put("","000");dstMap.put("M","001");dstMap.put("D","010");dstMap.put("MD","011");
+        dstMap.put("A","100");dstMap.put("AM","101");dstMap.put("AD","110");dstMap.put("AMD","111");
+
+        //put all jmp possibilities into a HashMap
+        jmpMap.put("","000");jmpMap.put("JGT","001");jmpMap.put("JEQ","010");jmpMap.put("JGE","011");
+        jmpMap.put("JLT","100");jmpMap.put("JNE","101");jmpMap.put("JLE","110");jmpMap.put("JMP","111");
+
+    }
+
+    public static Parser getInstance() {
+        return (my_parser_instance==null) ? new Parser(): my_parser_instance ;
+    }
+
+    // Create new Pure .asm file with no comments and space
+    public void TranslateToHack(String asm_path , String hack_path)  throws  Exception {
+        this.asm_path = asm_path ;
+        this.hack_path= hack_path ;
+        StringBuilder binaryBuilder = new StringBuilder();
+
+        File pureFile = new File(asm_path) ;
+        StringBuilder pureBuilder = new StringBuilder() ;
+        Scanner scanner = new Scanner(pureFile);
+
+        while(scanner.hasNextLine()) {
+            String line = scanner.nextLine();
+            line =  pureAsmLine(line) ; // get only asm lines
+            if (line.length() > 0 ) {
+                pureBuilder.append(line);
+                pureBuilder.append("\n");
+            }
+        }
+        // delete last line
+        int lastline = pureBuilder.lastIndexOf("\n");
+        if (lastline!=-1) pureBuilder.delete(lastline,pureBuilder.length());
+        // System.out.println("Pure file is :\n" +pureBuilder.toString()+"\n last line");
+
+        /** Now find labels*/
+        findLabels(pureBuilder.toString());
+
+        // now parse all commands to binary
+        for (String instruction : pureBuilder.toString().split("\n")){
+                /* dest =comp ; jump // Either the dest or jump fields may be empty.
+                   If dest is empty, the "="  is omitted;
+                   If jump is empty, the ";" is omitted.
+                */
+            if (isC_instruction(instruction)) {
+                String dest = instr_chunk(instruction ,__DEST ) ;
+                String cmp = instr_chunk(instruction ,__COMP )  ;
+                String jmp = instr_chunk(instruction ,__JMP )   ;
+                // now make 1 line Binary instruction
+                // Binary: 1 1 1 a c1 c2 c3 c4 c5 c6 d1 d2 d3 j1 j2 j3
+                binaryBuilder.append("111")
+                        .append(cmp)
+                        .append(dest)
+                        .append(jmp)
+                        .append("\n") ;
+            }
+            // if is label / var
+            else if (isA_instruction(instruction)) { // @xXx
+                String a_val  = instruction.substring(1);
+                // decimal value or function declaration
+                if (cMap.containsKey(a_val)) {
+                    // label or symbol that already added to the table
+                    // just translate its value to Binary value
+                    String a2 = get16Bit(Integer.toBinaryString(cMap.get(a_val)));
+//                    String a2 = Integer.toBinaryString(cMap.get(instruction.substring(1)));
+                    binaryBuilder.append(a2).append("\n");
+                }
+                else {
+                    // its variable that have not been Added or pure decimal
+                    // 1- if its pure decimal value
+                    if (isNumeric(a_val)) {
+                        binaryBuilder
+                                .append(get16Bit(Integer.toBinaryString(Integer.parseInt(a_val))))
+                                .append("\n");
+                        continue;
+                    }
+                    // 2- if variable that have not been added
+                    // add the variable and update variables count
+                    cMap.put(a_val , vars_count);
+                    binaryBuilder
+                            .append(get16Bit(Integer.toBinaryString(vars_count)))
+                            .append("\n");
+                     vars_count++ ;
+                }
+            }
+            else if (isL_instruction(instruction)) {   /*Hmm... */ }
+
+
+        }// end of loop
+        // nice now create the file.hack and
+        this.touchHackFile(binaryBuilder.toString()) ;
+
+    }
+
+    private void touchHackFile(String str ) {
+        try {
+            FileWriter fileWriter = new FileWriter(hack_path);
+            fileWriter.write(str);
+            fileWriter.close();
+            System.out.println("Successfully wrote to the file.\n");
+        }catch (Exception e) {
+            e.printStackTrace();;
+        }
+    }
+
+
+
+    /**
+     * @param toBinaryString binary value of number
+     * @return 16 bit binary string
+     */
+    private String get16Bit(String toBinaryString) {
+        int length = toBinaryString.length() ;
+        String msb = "" ;
+        for (int i = 0 ;  i < 16-length ; i++  ) {
+            msb+="0";
+        }
+        return msb+toBinaryString;
+
+    }
+
+
+
+    private String instr_chunk(String instruction, short _part) throws Exception {
+        String result = "";
+        // take apart the instruction dest = comp ; jump
+        switch (_part){
+            case __DEST:
+                int flag1= instruction.indexOf("=") ;
+                if (flag1!=-1){
+                    // ok we have dest
+                    result = instruction.substring(0,flag1);
+                    if (!dstMap.containsKey(result)) throw new Exception("C instruction syntax error"+ instruction +", "+ result+", DEST");  // todo change to my exception
+                    return dstMap.get(result);
+                }
+                return dstMap.get(""); // 000
+            case __COMP: // A=D , M=D , M=D+1
+                int flag2 = instruction.indexOf("=") ;
+
+                if (flag2!=-1) {
+                    result = instruction.substring(flag2+1); // what comes after "="
+                    if (compMMap.containsKey(result)) return  compMMap.get(result);
+                    if (compAMap.containsKey(result)) return  compAMap.get(result);
+                    throw new Exception("C instruction"+ instruction+ ", "+result+ " syntax error, COMP");  // todo change to my exception
+                } else {
+                    //
+                    int flag4  = instruction.lastIndexOf(";");
+                    if (flag4!=-1) {
+                        result = instruction.substring(0, flag4);
+                        if (compMMap.containsKey(result)) return   compMMap.get(result);
+                        if (compAMap.containsKey(result)) return  compAMap.get(result);
+                        throw new Exception("C instruction"+ instruction+ ", "+result+ " syntax error, CMP with no = sign");  // todo change to my exception
+                    }
+                }
+
+
+            case __JMP: // 0;JMP D;JMP
+                int flag3 = instruction.indexOf(";") ;
+                if (flag3!=-1) {
+                    result = instruction.substring(flag3+1); // what comes after ";"
+                    if (jmpMap.containsKey(result)) return jmpMap.get(result);
+                    throw new Exception("C instruction syntax error, JMP"+instruction+" " + result);  // todo change to my exception
+                }
+                return jmpMap.get("");
+
+        }// rend o
+        return  result;
+    }
+
+
+    /**
+     * @param instructions scanned string line form file
+     *    add labels to the cMap , with each insertion to the table increase pc
+     *    see Hack assembly logic in the chapter 6
+     */
+    private  void findLabels(String instructions) {
+        int pc = -1 ;
+        for ( String line: instructions.split("\n")) {
+            if (line.startsWith("(") && line.endsWith(")")) { // it is A label
+                String tempLabel = line.substring(1 , line.trim().length() -1 ) ;
+                cMap.put(tempLabel,pc+1);
+            }
+            else {
+                pc++;
+            }
+        }
+        System.out.println(cMap.toString());
+    }
+
+    /**
+     * @param line scanned string line form file
+     * @return trimmed string  with no comments
+     */
+    private static String pureAsmLine(String line) {
+        String m_line = line.trim() ;
+        String result="" ;
+        if (m_line.length()==0){ // remove spaces and empty lines
+            return "" ;
+        }
+        if (m_line.startsWith("//")){ // remove line start with comments
+            return "" ;
+        }
+
+        //remove comments after  EX: (M = D // comment ) -> (M = D)
+        int position = m_line.indexOf("//") ;
+        if (position!=-1) { // comment Found, substring comment
+            m_line = m_line.substring(0,position);
+        }
+        //remove all space between EX: (D = M) -> (D=M)
+        String[] tempresult = m_line.split(" ");
+        for (String i: tempresult) {
+            result+=i;
+        }
+
+        return result;
+
+    }
+
+    public static boolean isNumeric(String string) {
+        int intValue;
+        if(string == null || string.equals("")) {
+            return false;
+        }
+        try {
+            intValue = Integer.parseInt(string);
+            return true;
+        } catch (NumberFormatException e) {
+        }
+        return false;
+    }
+
+    /**
+     * @param instr takes instruction line a
+     * @return true if the instruction is not label or variable
+     * Example instr = (label), false
+     *         instr = M=D, true
+     */
+    boolean isC_instruction(String instr) {
+        return !(instr.startsWith("@") || instr.startsWith("(")) ;
+    }
+
+    boolean isA_instruction(String instr) {
+        return (instr.startsWith("@")) ;
+    }
+
+    private boolean isL_instruction(String instruction) {
+        return instruction.startsWith("(") && instruction.endsWith(")");
+    }
+
+}//end of class
+
+
+
